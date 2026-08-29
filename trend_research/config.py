@@ -1,0 +1,7 @@
+POLL_SECONDS=120
+MIN_PULLBACK_PCT=20.0
+MAX_PULLBACK_PCT=50.0
+SECOND_PUMP_PCT=80.0
+TREND_URL='https://dexscreener.com/5m'
+TIMEOUT=20
+USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151.0 Safari/537.36'
