@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import time
 import requests
@@ -12,8 +13,15 @@ DB = Path("trend_research_v2.db")
 
 POLL = 5
 
-BOT_TOKEN = "PUT_YOUR_BOT_TOKEN_HERE"
-CHAT_ID = "PUT_YOUR_CHAT_ID_HERE"
+# Telegram credentials come from Render Environment Variables.
+#
+# Render:
+# BOT_TOKEN = your Telegram bot token
+# CHAT_ID   = your Telegram chat ID
+#
+# DO NOT put the real token directly into this file.
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 
 # ============================================================
@@ -21,12 +29,16 @@ CHAT_ID = "PUT_YOUR_CHAT_ID_HERE"
 # ============================================================
 
 def get_db():
+
     con = sqlite3.connect(DB)
+
     con.row_factory = sqlite3.Row
+
     return con
 
 
 def ensure_telegram_sent_table(con):
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS telegram_sent(
             address TEXT PRIMARY KEY,
@@ -34,6 +46,7 @@ def ensure_telegram_sent_table(con):
             sent_at TEXT
         )
     """)
+
     con.commit()
 
 
@@ -43,7 +56,10 @@ def ensure_telegram_sent_table(con):
 
 def send_telegram(text):
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{BOT_TOKEN}/sendMessage"
+    )
 
     payload = {
         "chat_id": CHAT_ID,
@@ -53,46 +69,57 @@ def send_telegram(text):
     }
 
     try:
-        r = requests.post(
+
+        response = requests.post(
             url,
             json=payload,
             timeout=20,
         )
 
-        if r.status_code != 200:
+        if response.status_code != 200:
+
             print(
                 f"[TELEGRAM ERROR] "
-                f"HTTP {r.status_code}: {r.text}"
+                f"HTTP {response.status_code}: "
+                f"{response.text}",
+                flush=True,
             )
+
             return False
 
-        data = r.json()
+        data = response.json()
 
         if not data.get("ok"):
+
             print(
-                f"[TELEGRAM ERROR] {data}"
+                f"[TELEGRAM ERROR] {data}",
+                flush=True,
             )
+
             return False
 
         return True
 
     except Exception as e:
+
         print(
-            f"[TELEGRAM ERROR] {e}"
+            f"[TELEGRAM ERROR] {e}",
+            flush=True,
         )
+
         return False
 
 
 # ============================================================
-# ALERT FORMAT
+# FORMAT ALERT
 # ============================================================
 
 def make_alert(row):
 
     address = row["address"]
 
-    rank = row["rank"]
     event_time = row["t"]
+    rank = row["rank"]
 
     mc = row["mc"]
     price = row["price"]
@@ -102,7 +129,7 @@ def make_alert(row):
     buys = row["buys"]
     sells = row["sells"]
 
-    return (
+    text = (
         "🔥 <b>TREND MARK</b>\n"
         "\n"
         "<b>CA:</b>\n"
@@ -118,6 +145,8 @@ def make_alert(row):
         f"Buys: {buys}\n"
         f"Sells: {sells}"
     )
+
+    return text
 
 
 # ============================================================
@@ -140,67 +169,97 @@ def main():
     print()
 
     # --------------------------------------------------------
-    # CONFIG CHECK
+    # TELEGRAM CONFIG CHECK
     # --------------------------------------------------------
 
-    if BOT_TOKEN == "PUT_YOUR_BOT_TOKEN_HERE":
-        print("ERROR: Put your Telegram bot token in the file.")
+    if not BOT_TOKEN:
+
+        print(
+            "ERROR: BOT_TOKEN environment variable "
+            "is missing.",
+            flush=True,
+        )
+
         return
 
-    if CHAT_ID == "PUT_YOUR_CHAT_ID_HERE":
-        print("ERROR: Put your Telegram chat ID in the file.")
+    if not CHAT_ID:
+
+        print(
+            "ERROR: CHAT_ID environment variable "
+            "is missing.",
+            flush=True,
+        )
+
         return
+
+    # --------------------------------------------------------
+    # DATABASE
+    # --------------------------------------------------------
 
     con = get_db()
 
-    # --------------------------------------------------------
-    # CHECK DATABASE
-    # --------------------------------------------------------
+    try:
 
-    tables = {
-        r["name"]
-        for r in con.execute("""
+        # ----------------------------------------------------
+        # Check required table
+        # ----------------------------------------------------
+
+        table = con.execute("""
             SELECT name
             FROM sqlite_master
             WHERE type='table'
-        """).fetchall()
-    }
+              AND name='trend_events'
+        """).fetchone()
 
-    if "trend_events" not in tables:
-        print("[ERROR] trend_events table does not exist.")
-        con.close()
-        return
+        if not table:
 
-    # Create protection table if needed.
-    ensure_telegram_sent_table(con)
+            print(
+                "ERROR: trend_events table does not exist.",
+                flush=True,
+            )
 
-    # --------------------------------------------------------
-    # IMPORTANT
-    #
-    # Do NOT send old ENTER events when this worker starts.
-    #
-    # We start watching from the current end of trend_events.
-    # Only NEW ENTER events created after startup are alerted.
-    # --------------------------------------------------------
+            return
 
-    row = con.execute("""
-        SELECT COALESCE(MAX(id), 0) AS max_id
-        FROM trend_events
-    """).fetchone()
+        # ----------------------------------------------------
+        # Create Telegram history table if missing
+        # ----------------------------------------------------
 
-    last_id = row["max_id"]
+        ensure_telegram_sent_table(con)
 
-    print(
-        f"Starting after existing event ID: {last_id}"
-    )
+        # ----------------------------------------------------
+        # IMPORTANT:
+        #
+        # Start at the CURRENT end of the database.
+        #
+        # Old ENTER events are NOT sent.
+        #
+        # Only ENTER events created after this worker starts
+        # are considered for Telegram.
+        # ----------------------------------------------------
 
-    print("Ready.\n")
+        row = con.execute("""
+            SELECT COALESCE(MAX(id), 0) AS max_id
+            FROM trend_events
+        """).fetchone()
 
-    # ========================================================
-    # WATCH LOOP
-    # ========================================================
+        last_id = row["max_id"]
 
-    try:
+        print(
+            f"Starting after existing event ID: "
+            f"{last_id}",
+            flush=True,
+        )
+
+        print(
+            "Ready.",
+            flush=True,
+        )
+
+        print()
+
+        # ====================================================
+        # WATCH LOOP
+        # ====================================================
 
         while True:
 
@@ -229,7 +288,7 @@ def main():
                 address = row["address"]
 
                 # ------------------------------------------------
-                # ONE CA = ONE TELEGRAM ALERT
+                # ONE CA = ONE ALERT
                 # ------------------------------------------------
 
                 already_sent = con.execute("""
@@ -242,13 +301,14 @@ def main():
                 if already_sent:
 
                     print(
-                        f"[SKIP] Already alerted: "
-                        f"{address}"
+                        f"[SKIP] Already alerted "
+                        f"{address[:12]}...",
+                        flush=True,
                     )
 
                     last_id = max(
                         last_id,
-                        event_id
+                        event_id,
                     )
 
                     continue
@@ -256,21 +316,23 @@ def main():
                 # ------------------------------------------------
                 # FIRST TREND MARK
                 #
-                # NO FILTER
+                # NO MC FILTER
+                # NO LIQUIDITY FILTER
+                # NO AGE FILTER
                 # NO SCORE
-                # NO MC CHECK
-                # NO LIQUIDITY CHECK
-                # NO AGE CHECK
+                # NO RANK FILTER
                 # NO WAIT
+                #
+                # ENTER = ALERT
                 # ------------------------------------------------
 
                 message = make_alert(row)
 
-                print()
                 print(
                     f"[NEW TREND] "
                     f"#{row['rank']} "
-                    f"{address}"
+                    f"{address}",
+                    flush=True,
                 )
 
                 # ------------------------------------------------
@@ -282,7 +344,7 @@ def main():
                 if success:
 
                     # --------------------------------------------
-                    # SAVE AFTER SUCCESS
+                    # Save only after successful Telegram send.
                     # --------------------------------------------
 
                     con.execute("""
@@ -292,7 +354,8 @@ def main():
                             event_id,
                             sent_at
                         )
-                        VALUES(
+                        VALUES
+                        (
                             ?,
                             ?,
                             datetime('now')
@@ -305,23 +368,27 @@ def main():
                     con.commit()
 
                     print(
-                        f"[SENT] {address}"
+                        f"[SENT] {address}",
+                        flush=True,
                     )
 
                     last_id = max(
                         last_id,
-                        event_id
+                        event_id,
                     )
 
                 else:
 
                     print(
                         "[NOT SENT] "
-                        "Telegram failed."
+                        "Telegram failed. Retrying.",
+                        flush=True,
                     )
 
-                    # Do not advance.
-                    # It will retry.
+                    # Do not advance last_id.
+                    #
+                    # The same ENTER will be retried
+                    # on the next polling cycle.
 
                     break
 
@@ -330,7 +397,19 @@ def main():
     except KeyboardInterrupt:
 
         print()
-        print("Stopped.")
+        print(
+            "Stopped.",
+            flush=True,
+        )
+
+    except Exception as e:
+
+        print(
+            f"[WORKER ERROR] {e}",
+            flush=True,
+        )
+
+        raise
 
     finally:
 
@@ -342,4 +421,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
