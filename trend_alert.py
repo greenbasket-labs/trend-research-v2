@@ -1,6 +1,5 @@
 import sqlite3
 import time
-import os
 import requests
 from pathlib import Path
 
@@ -13,9 +12,8 @@ DB = Path("trend_research_v2.db")
 
 POLL = 5
 
-# Render Environment Variables
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-CHAT_ID = os.getenv("CHAT_ID", "").strip()
+BOT_TOKEN = "PUT_YOUR_BOT_TOKEN_HERE"
+CHAT_ID = "PUT_YOUR_CHAT_ID_HERE"
 
 
 # ============================================================
@@ -23,55 +21,8 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 # ============================================================
 
 def get_db():
-    con = sqlite3.connect(
-        DB,
-        timeout=30,
-        check_same_thread=False,
-    )
-
+    con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
-
-    # --------------------------------------------------------
-    # IMPORTANT
-    #
-    # Render may start with a completely new SQLite database.
-    # Create the tables required by the alert worker.
-    # --------------------------------------------------------
-
-    con.executescript("""
-    CREATE TABLE IF NOT EXISTS trend_events(
-        id INTEGER PRIMARY KEY,
-        address TEXT,
-        t TEXT,
-        event_type TEXT,
-        rank INTEGER,
-        mc REAL,
-        price REAL,
-        liquidity REAL,
-        vol5 REAL,
-        buys INTEGER,
-        sells INTEGER
-    );
-
-    CREATE TABLE IF NOT EXISTS telegram_sent(
-        id INTEGER PRIMARY KEY,
-        address TEXT UNIQUE,
-        event_id INTEGER,
-        sent_at TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_trend_events_id
-    ON trend_events(id);
-
-    CREATE INDEX IF NOT EXISTS idx_trend_events_type
-    ON trend_events(event_type);
-
-    CREATE INDEX IF NOT EXISTS idx_telegram_sent_address
-    ON telegram_sent(address);
-    """)
-
-    con.commit()
-
     return con
 
 
@@ -81,14 +32,12 @@ def get_db():
 
 def send_telegram(text):
 
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/sendMessage"
-    )
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     payload = {
         "chat_id": CHAT_ID,
         "text": text,
+        "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
 
@@ -140,25 +89,28 @@ def make_alert(row):
     address = row["address"]
 
     event_time = row["t"]
-
     rank = row["rank"]
 
     mc = row["mc"]
-
     price = row["price"]
-
     liquidity = row["liquidity"]
-
     vol5 = row["vol5"]
 
     buys = row["buys"]
-
     sells = row["sells"]
 
+    # --------------------------------------------------------
+    # CA IS IN A CODE BLOCK.
+    #
+    # On Telegram mobile this makes the CA very easy
+    # to select/copy.
+    # --------------------------------------------------------
+
     text = (
-        "🔥 TREND MARK\n"
+        "🔥 <b>TREND MARK</b>\n"
         "\n"
-        f"CA:\n{address}\n"
+        "<b>CA:</b>\n"
+        f"<code>{address}</code>\n"
         "\n"
         f"Rank: #{rank}\n"
         f"Time: {event_time}\n"
@@ -175,33 +127,6 @@ def make_alert(row):
 
 
 # ============================================================
-# CHECK TELEGRAM CONFIG
-# ============================================================
-
-def check_config():
-
-    if not BOT_TOKEN:
-
-        print(
-            "ERROR: BOT_TOKEN environment variable "
-            "is missing."
-        )
-
-        return False
-
-    if not CHAT_ID:
-
-        print(
-            "ERROR: CHAT_ID environment variable "
-            "is missing."
-        )
-
-        return False
-
-    return True
-
-
-# ============================================================
 # MAIN
 # ============================================================
 
@@ -211,35 +136,97 @@ def main():
     print("==========================================")
     print("       TREND TELEGRAM ALERT")
     print("==========================================")
+
     print(
         f"Database: {DB.resolve()}"
     )
+
     print(
         f"Poll: {POLL}s"
     )
+
     print()
+
     print(
         "Watching: trend_events"
     )
+
     print(
         "Alert: ENTER only"
     )
+
     print(
         "Duplicate CA: NEVER send again"
     )
+
     print()
 
-    if not check_config():
+    # --------------------------------------------------------
+    # CHECK CONFIG
+    # --------------------------------------------------------
+
+    if BOT_TOKEN == "PUT_YOUR_BOT_TOKEN_HERE":
+
+        print(
+            "ERROR: Put your Telegram bot token in the file."
+        )
 
         return
+
+    if CHAT_ID == "PUT_YOUR_CHAT_ID_HERE":
+
+        print(
+            "ERROR: Put your Telegram chat ID in the file."
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # CONNECT DATABASE
+    # --------------------------------------------------------
 
     con = get_db()
 
     # --------------------------------------------------------
-    # START AT CURRENT END
+    # VERIFY TABLES
+    # --------------------------------------------------------
+
+    tables = {
+        r["name"]
+        for r in con.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table'
+            """
+        ).fetchall()
+    }
+
+    if "trend_events" not in tables:
+
+        print(
+            "[ERROR] trend_events table does not exist."
+        )
+
+        con.close()
+
+        return
+
+    if "telegram_sent" not in tables:
+
+        print(
+            "[ERROR] telegram_sent table does not exist."
+        )
+
+        con.close()
+
+        return
+
+    # --------------------------------------------------------
+    # START FROM CURRENT END
     #
-    # This prevents old ENTER events from being sent when
-    # Render starts for the first time.
+    # Existing old ENTER events will NOT be sent.
+    # Only future ENTER events are processed.
     # --------------------------------------------------------
 
     row = con.execute(
@@ -256,62 +243,41 @@ def main():
     )
 
     print(
-        "Ready."
+        "Ready.\n"
     )
 
-    print()
+    # ========================================================
+    # LOOP
+    # ========================================================
 
     try:
 
         while True:
 
-            # ------------------------------------------------
-            # Reconnect database every loop.
-            #
-            # This is safer if main.py writes while we read.
-            # ------------------------------------------------
+            rows = con.execute(
+                """
+                SELECT
+                    id,
+                    address,
+                    t,
+                    event_type,
+                    rank,
+                    mc,
+                    price,
+                    liquidity,
+                    vol5,
+                    buys,
+                    sells
 
-            try:
+                FROM trend_events
 
-                rows = con.execute(
-                    """
-                    SELECT
-                        id,
-                        address,
-                        t,
-                        event_type,
-                        rank,
-                        mc,
-                        price,
-                        liquidity,
-                        vol5,
-                        buys,
-                        sells
-                    FROM trend_events
-                    WHERE id > ?
-                      AND event_type = 'ENTER'
-                    ORDER BY id ASC
-                    """,
-                    (last_id,),
-                ).fetchall()
+                WHERE id > ?
+                  AND event_type = 'ENTER'
 
-            except sqlite3.OperationalError as e:
-
-                print(
-                    f"[DATABASE ERROR] {e}"
-                )
-
-                con.close()
-
-                time.sleep(POLL)
-
-                con = get_db()
-
-                continue
-
-            # ------------------------------------------------
-            # PROCESS NEW ENTER EVENTS
-            # ------------------------------------------------
+                ORDER BY id ASC
+                """,
+                (last_id,),
+            ).fetchall()
 
             for row in rows:
 
@@ -319,15 +285,21 @@ def main():
 
                 address = row["address"]
 
-                # --------------------------------------------
-                # EXTRA DUPLICATE PROTECTION
-                # --------------------------------------------
+                # ------------------------------------------------
+                # DUPLICATE PROTECTION
+                #
+                # If this CA was EVER successfully sent,
+                # never send it again.
+                # ------------------------------------------------
 
                 already_sent = con.execute(
                     """
                     SELECT 1
+
                     FROM telegram_sent
+
                     WHERE address = ?
+
                     LIMIT 1
                     """,
                     (address,),
@@ -342,27 +314,26 @@ def main():
 
                     last_id = max(
                         last_id,
-                        event_id,
+                        event_id
                     )
 
                     continue
 
-                # --------------------------------------------
+                # ------------------------------------------------
                 # CREATE MESSAGE
-                # --------------------------------------------
+                # ------------------------------------------------
 
                 message = make_alert(row)
 
-                print()
                 print(
                     f"[NEW TREND] "
                     f"#{row['rank']} "
                     f"{address[:12]}..."
                 )
 
-                # --------------------------------------------
+                # ------------------------------------------------
                 # SEND
-                # --------------------------------------------
+                # ------------------------------------------------
 
                 success = send_telegram(
                     message
@@ -370,43 +341,31 @@ def main():
 
                 if success:
 
-                    # ----------------------------------------
-                    # RECORD BEFORE MOVING ON
-                    # ----------------------------------------
+                    # --------------------------------------------
+                    # RECORD SUCCESS BEFORE MOVING ON
+                    # --------------------------------------------
 
-                    try:
-
-                        con.execute(
-                            """
-                            INSERT INTO telegram_sent
-                            (
-                                address,
-                                event_id,
-                                sent_at
-                            )
-                            VALUES(
-                                ?,
-                                ?,
-                                datetime('now')
-                            )
-                            """,
-                            (
-                                address,
-                                event_id,
-                            ),
+                    con.execute(
+                        """
+                        INSERT INTO telegram_sent
+                        (
+                            address,
+                            event_id,
+                            sent_at
                         )
-
-                        con.commit()
-
-                    except sqlite3.IntegrityError:
-
-                        # Another process/restart already
-                        # recorded this CA.
-
-                        print(
-                            f"[SKIP] Duplicate CA "
-                            f"{address[:12]}..."
+                        VALUES(
+                            ?,
+                            ?,
+                            datetime('now')
                         )
+                        """,
+                        (
+                            address,
+                            event_id,
+                        ),
+                    )
+
+                    con.commit()
 
                     print(
                         f"[SENT] {address}"
@@ -414,7 +373,7 @@ def main():
 
                     last_id = max(
                         last_id,
-                        event_id,
+                        event_id
                     )
 
                 else:
@@ -424,9 +383,11 @@ def main():
                         "Will retry."
                     )
 
-                    # ----------------------------------------
+                    # --------------------------------------------
                     # DO NOT advance last_id.
-                    # ----------------------------------------
+                    #
+                    # Telegram failed, so retry next loop.
+                    # --------------------------------------------
 
                     break
 
